@@ -9,6 +9,7 @@ from io import BytesIO
 import tempfile
 import shutil
 import streamlit as st
+import io
 
 class CompletePlatform:
     def __init__(self):
@@ -156,7 +157,10 @@ class CompletePlatform:
         
         # Display detected Y/N fields
         if analysis.get('yn_fields_detected', 0) > 0:
-            st.info(f"✅ Detected {analysis['yn_fields_detected']} Y/N upgrade fields automatically!")
+            st.info(f"✅ Detected {analysis['yn_fields_detected']} Y/N upgrade fields from existing brokers!")
+        
+        if analysis.get('item_upgrades_detected', 0) > 0:
+            st.info(f"✅ Detected {analysis['item_upgrades_detected']} optional upgrades from ITEM column with default 'N' values!")
         
         upgrade_mappings = {}
         
@@ -196,7 +200,9 @@ class CompletePlatform:
                 
                 with col1:
                     include_upgrade = st.checkbox(
-                        f"**{upgrade_key}**" + (" (Y/N field)" if upgrade_info.get('is_yn') else ""),
+                        f"**{upgrade_key}**" + 
+                        (" (Y/N field)" if upgrade_info.get('is_yn') else "") +
+                        (" [from ITEM column]" if upgrade_info.get('from_item_column') else ""),
                         value=True,
                         key=f"upgrade_{upgrade_key}"
                     )
@@ -276,6 +282,9 @@ class CompletePlatform:
         extracted_data = {}
         row_mappings = config.get("row_mappings", {})
         
+        st.write("🔍 **Starting PDF data extraction...**")
+        st.write(f"📋 **Configured fields**: {list(row_mappings.keys())}")
+        
         # Extract Serial Number
         serial_patterns = [
             r'serial\s+number[:\s]*([A-Z0-9\-]+)',
@@ -307,70 +316,87 @@ class CompletePlatform:
                     extracted_data["year_model"] = int(year_match.group(0))
                     break
         
-        # Total Hours - Improved to specifically look for "Total Time Since New" first
+        # Total Hours - Improved to handle various formats
         total_hours_patterns = [
-            r'total\s+time\s+since\s+new[:\s]*(\d{1,5}[,\.]?\d{0,3})',
-            r'total\s+hours\s+since\s+new[:\s]*(\d{1,5}[,\.]?\d{0,3})',
-            r'ttsn[:\s]*(\d{1,5}[,\.]?\d{0,3})',
-            r'total\s+time[:\s]*(\d{1,5}[,\.]?\d{0,3})',
-            r'total\s+hours[:\s]*(\d{1,5}[,\.]?\d{0,3})'
+            r'(\d{1,2}[,\.]?\d{3})\s*airframe\s*hours\s*since\s*new',
+            r'airframe\s*hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'total\s+time\s+since\s+new[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'(\d{1,2}[,\.]?\d{3})\s*hours\s*since\s*new',
+            r'hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'hours\s*/?\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'ttsn[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'total\s+hours[:\s]*(\d{1,2}[,\.]?\d{3})'
         ]
         
         for pattern in total_hours_patterns:
             match = re.search(pattern, pdf_text, re.IGNORECASE)
             if match:
-                hours_str = match.group(1).replace(",", "").split(".")[0]
+                hours_str = match.group(1).replace(",", "").replace(".", "")
                 hours_value = int(hours_str)
                 extracted_data["total_hours"] = hours_value
                 st.write(f"✅ **TOTAL HOURS FOUND**: {hours_value} (pattern: {pattern})")
                 break
         
-        # Engine Overhaul - Look for ENGINE section then hours
+        # Engine Overhaul - Handle format like "985/1227 Engine Hours Since Overhaul"
         engine_patterns = [
-            r'engines?\s*[\s\S]{0,100}?(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*hours',
-            r'engines?\s*[\s\S]{0,100}?total\s*hours?\s*[:\s]*(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?',
-            r'engine\s+time\s+since\s+overhaul[:\s]*(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?',
-            r'engine\s+overhaul[:\s]*(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?',
-            r'tsoh[:\s]*(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?',
-            r'time\s+since\s+overhaul[:\s]*(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
+            r'(\d{3,4})/(\d{1,2}[,\.]?\d{3})\s*engine\s*hours\s*since\s*overhaul',  # Matches 985/1227 pattern
+            r'engine\s*hours\s*since\s*overhaul[:\s]*(\d{3,4})/(\d{1,2}[,\.]?\d{3})',
+            r'(\d{1,2}[,\.]?\d{3})\s*hours\s*since\s*overhaul',
+            r'hours\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'time\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'overhaul\s*hours[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'engines?\s*[\s\S]{0,200}?(\d{1,2}[,\.]?\d{3})\s*hours',
+            r'engine\s+time\s+since\s+overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'tsoh[:\s]*(\d{1,2}[,\.]?\d{3})'
         ]
-
+        
         engine_found = False
-        # First try to find an ENGINES section
-        engines_section_match = re.search(
-            r'engines?\s*[:\-\s]*([\s\S]{0,500}?)(?=\n\n|\navionics|\ninterior|\nexterior|$)',
-            pdf_text,
-            re.IGNORECASE
-        )
-
-        if engines_section_match:
-            engines_text = engines_section_match.group(1)
-            # Look for hours in the engines section
-            hours_match = re.search(r'(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*hours', engines_text, re.IGNORECASE)
-            if hours_match:
-                hours_str = hours_match.group(1).replace(",", "").strip()
-                hours_value = int(hours_str)
-                formatted_hours = f"{hours_value:,}"
-                extracted_data["engine_overhaul"] = formatted_hours
-                st.write(f"✅ **ENGINE OVERHAUL FOUND IN ENGINES SECTION**: {formatted_hours}")
-                engine_found = True
-
-        # If not found in engines section, try other patterns
-        if not engine_found:
-            for pattern in engine_patterns:
-                match = re.search(pattern, pdf_text, re.IGNORECASE)
-                if match:
-                    hours_str = match.group(1).replace(",", "").strip()
+        
+        # Check for the special format first (985/1227)
+        for pattern in engine_patterns[:2]:
+            match = re.search(pattern, pdf_text, re.IGNORECASE)
+            if match:
+                # For patterns with two groups, take the second (larger) number
+                if match.lastindex == 2:
+                    hours_str = match.group(2).replace(",", "").replace(".", "")
                     hours_value = int(hours_str)
-                    formatted_hours = f"{hours_value:,}"
-                    extracted_data["engine_overhaul"] = formatted_hours
-                    st.write(f"✅ **ENGINE OVERHAUL FOUND**: {formatted_hours}")
+                    extracted_data["engine_overhaul"] = hours_value
+                    st.write(f"✅ **ENGINE OVERHAUL FOUND (from dual format)**: {hours_value}")
                     engine_found = True
                     break
+        
+        # If not found in dual format, try other patterns
+        if not engine_found:
+            # Try to find an ENGINES section
+            engines_section_match = re.search(r'engines?\s*[:\-\s]*([\s\S]{0,500}?)(?=\n\n|\navionics|\ninterior|\nexterior|$)', pdf_text, re.IGNORECASE)
+            
+            if engines_section_match:
+                engines_text = engines_section_match.group(1)
+                # Look for hours in the engines section
+                hours_match = re.search(r'(\d{1,2}[,\.]?\d{3})\s*hours', engines_text, re.IGNORECASE)
+                if hours_match:
+                    hours_str = hours_match.group(1).replace(",", "").replace(".", "")
+                    hours_value = int(hours_str)
+                    extracted_data["engine_overhaul"] = hours_value
+                    st.write(f"✅ **ENGINE OVERHAUL FOUND IN ENGINES SECTION**: {hours_value}")
+                    engine_found = True
+            
+            # Try remaining patterns
+            if not engine_found:
+                for pattern in engine_patterns[2:]:
+                    match = re.search(pattern, pdf_text, re.IGNORECASE)
+                    if match:
+                        hours_str = match.group(1).replace(",", "").replace(".", "")
+                        hours_value = int(hours_str)
+                        extracted_data["engine_overhaul"] = hours_value
+                        st.write(f"✅ **ENGINE OVERHAUL FOUND**: {hours_value}")
+                        engine_found = True
+                        break
         
         # If no engine overhaul found, default to total hours
         if not engine_found and "total_hours" in extracted_data:
             extracted_data["engine_overhaul"] = extracted_data["total_hours"]
+            st.write(f"⚠️ **ENGINE OVERHAUL defaulted to total hours**: {extracted_data['total_hours']}")
         
         # Number of Seats
         seat_patterns = [r'(\w+)\s+\(\d+\)\s+passenger', r'(\d+)\s+passengers?']
@@ -963,106 +989,197 @@ def main():
             st.markdown("---")
             st.subheader("✈️ Process Aircraft Data")
             
-            col1, col2 = st.columns(2)
-            with col1:
-                serial_number = st.text_input("Serial Number:", placeholder="e.g., 0028")
-            with col2:
-                broker_name = st.text_input("Broker Name:", placeholder="e.g., FlyAlliance")
+            # Choose between single or multiple PDF mode
+            process_mode = st.radio("Processing Mode:", ["Single PDF", "Multiple PDFs"], horizontal=True)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                pdf_file = st.file_uploader("Upload Broker PDF", type="pdf")
-            with col2:
-                excel_file = st.file_uploader("Upload Excel Sheet", type="xlsx")
+            if process_mode == "Single PDF":
+                col1, col2 = st.columns(2)
+                with col1:
+                    serial_number = st.text_input("Serial Number:", placeholder="e.g., 0028", key="single_serial")
+                with col2:
+                    broker_name = st.text_input("Broker Name:", placeholder="e.g., FlyAlliance", key="single_broker")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    pdf_file = st.file_uploader("Upload Broker PDF", type="pdf", key="single_pdf")
+                with col2:
+                    excel_file = st.file_uploader("Upload Excel Sheet", type="xlsx", key="single_excel")
+                
+                if pdf_file:
+                    pdf_details = [{"pdf": pdf_file, "serial": serial_number, "broker": broker_name}]
+                else:
+                    pdf_details = []
             
-            if serial_number and broker_name and pdf_file and excel_file:
-                if st.button("🚀 Process Aircraft Data", type="primary"):
-                    with st.spinner("Processing..."):
-                        
-                        pdf_text = platform.extract_text_from_pdf(pdf_file)
-                        
-                        if not pdf_text:
-                            st.error("Could not extract text from PDF")
+            else:  # Multiple PDFs mode
+                excel_file = st.file_uploader("Upload Excel Sheet", type="xlsx", key="multi_excel")
+                
+                st.write("### Add PDF Details")
+                
+                # Initialize session state for PDF details if not exists
+                if 'pdf_entries' not in st.session_state:
+                    st.session_state.pdf_entries = []
+                
+                # Add new PDF entry
+                with st.expander("➕ Add New PDF Entry", expanded=True):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col1:
+                        new_pdf = st.file_uploader("PDF File:", type="pdf", key="new_pdf")
+                    with col2:
+                        new_serial = st.text_input("Serial Number:", key="new_serial")
+                    with col3:
+                        new_broker = st.text_input("Broker Name:", key="new_broker")
+                    
+                    if st.button("➕ Add PDF", type="secondary"):
+                        if new_pdf and new_serial and new_broker:
+                            st.session_state.pdf_entries.append({
+                                "pdf": new_pdf,
+                                "serial": new_serial,
+                                "broker": new_broker,
+                                "name": new_pdf.name
+                            })
+                            st.success(f"Added {new_pdf.name}")
+                            st.rerun()
                         else:
+                            st.error("Please fill all fields before adding")
+                
+                # Display current PDF entries
+                if st.session_state.pdf_entries:
+                    st.write("### Current PDF Queue:")
+                    for idx, entry in enumerate(st.session_state.pdf_entries):
+                        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                        with col1:
+                            st.write(f"📄 {entry['name']}")
+                        with col2:
+                            st.write(f"Serial: {entry['serial']}")
+                        with col3:
+                            st.write(f"Broker: {entry['broker']}")
+                        with col4:
+                            if st.button("❌", key=f"remove_{idx}"):
+                                st.session_state.pdf_entries.pop(idx)
+                                st.rerun()
+                    
+                    # Clear all button
+                    if st.button("🗑️ Clear All PDFs"):
+                        st.session_state.pdf_entries = []
+                        st.rerun()
+                
+                pdf_details = st.session_state.pdf_entries
+            
+            if pdf_details and excel_file and all(d["serial"] and d["broker"] for d in pdf_details):
+                if st.button("🚀 Process Aircraft Data", type="primary", key="process_btn"):
+                    results = []
+                    current_excel = excel_file
+                    
+                    for idx, detail in enumerate(pdf_details):
+                        st.write(f"\n### Processing PDF {idx + 1} of {len(pdf_details)}: {detail.get('name', detail['pdf'].name)}")
+                        
+                        with st.spinner(f"Processing {detail.get('name', detail['pdf'].name)}..."):
+                            pdf_text = platform.extract_text_from_pdf(detail['pdf'])
+                            
+                            if not pdf_text:
+                                st.error(f"Could not extract text from {detail.get('name', detail['pdf'].name)}")
+                                continue
+                            
                             aircraft_model = platform.identify_aircraft_from_pdf(pdf_text)
                             
                             if not aircraft_model:
-                                st.error("❌ Could not identify aircraft model")
+                                st.error(f"❌ Could not identify aircraft model in {detail.get('name', detail['pdf'].name)}")
                                 st.info("Available: " + ", ".join(st.session_state.configurations.keys()))
-                            else:
-                                st.success(f"✅ Identified: **{aircraft_model}**")
+                                continue
+                            
+                            st.success(f"✅ Identified: **{aircraft_model}**")
+                            
+                            extracted_data = platform.extract_data_from_pdf(pdf_text, aircraft_model)
+                            
+                            if extracted_data:
+                                st.subheader("📊 Extracted Data")
+                                col1, col2 = st.columns(2)
                                 
-                                extracted_data = platform.extract_data_from_pdf(pdf_text, aircraft_model)
+                                with col1:
+                                    st.write("**Core Fields:**")
+                                    for key, value in extracted_data.items():
+                                        if not key.startswith("upgrade_"):
+                                            st.write(f"• **{key}**: {value}")
                                 
-                                if extracted_data:
-                                    st.subheader("📊 Extracted Data")
-                                    col1, col2 = st.columns(2)
-                                    
-                                    with col1:
-                                        st.write("**Core Fields:**")
-                                        for key, value in extracted_data.items():
-                                            if not key.startswith("upgrade_"):
-                                                st.write(f"• **{key}**: {value}")
-                                    
-                                    with col2:
-                                        st.write("**Upgrades:**")
-                                        for key, value in extracted_data.items():
-                                            if key.startswith("upgrade_"):
-                                                upgrade_name = key.replace("upgrade_", "")
-                                                icon = "✅" if value == "Y" else "❌"
-                                                st.write(f"• {icon} **{upgrade_name}**: {value}")
-                                    
-                                    broker_info = platform.find_broker_column(excel_file, serial_number, broker_name)
-                                    
-                                    if not broker_info:
-                                        st.error("❌ Could not find broker column or insertion point")
-                                    else:
-                                        if broker_info['mode'] == 'update':
-                                            st.success(f"✅ Found existing entry in Column {broker_info['column']} - will update")
-                                        else:
-                                            st.success(f"✅ Will insert new row at Column {broker_info['column']}")
-                                        
-                                        updated_excel, backup_excel, updates = platform.update_excel(
-                                            excel_file, extracted_data, aircraft_model, broker_info
-                                        )
-                                        
-                                        if updated_excel:
-                                            mode_text = "updated" if broker_info['mode'] == 'update' else "inserted"
-                                            st.success(f"✅ Excel {mode_text} successfully!")
-                                            
-                                            if broker_info['mode'] == 'insert':
-                                                st.info("🆕 **New row inserted** in numerical order by serial number!")
-                                                st.warning("🔄 **Formulas automatically shifted** to maintain correct calculations!")
-                                            
-                                            if updates:
-                                                st.subheader("📋 Updates Made")
-                                                for update in updates[:10]:
-                                                    st.write(f"• {update}")
-                                            
-                                            col1, col2 = st.columns(2)
-                                            
-                                            with col1:
-                                                st.download_button(
-                                                    "📥 Download Updated Excel",
-                                                    updated_excel,
-                                                    f"UPDATED_{aircraft_model.replace(' ', '_')}_{serial_number}.xlsx",
-                                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                                )
-                                            
-                                            with col2:
-                                                st.download_button(
-                                                    "💾 Download Original Backup",
-                                                    backup_excel,
-                                                    f"ORIGINAL_{aircraft_model.replace(' ', '_')}_{serial_number}.xlsx",
-                                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                                )
-                                        else:
-                                            st.error("❌ Failed to update Excel")
+                                with col2:
+                                    st.write("**Upgrades:**")
+                                    for key, value in extracted_data.items():
+                                        if key.startswith("upgrade_"):
+                                            upgrade_name = key.replace("upgrade_", "")
+                                            icon = "✅" if value == "Y" else "❌"
+                                            st.write(f"• {icon} **{upgrade_name}**: {value}")
+                                
+                                broker_info = platform.find_broker_column(current_excel, detail["serial"], detail["broker"])
+                                
+                                if not broker_info:
+                                    st.error(f"❌ Could not find broker column or insertion point for {detail['serial']}")
+                                    continue
+                                
+                                if broker_info['mode'] == 'update':
+                                    st.success(f"✅ Found existing entry in Column {broker_info['column']} - will update")
                                 else:
-                                    st.error("❌ No data extracted")
+                                    st.success(f"✅ Will insert new row at Column {broker_info['column']}")
+                                
+                                updated_excel, backup_excel, updates = platform.update_excel(
+                                    current_excel, extracted_data, aircraft_model, broker_info
+                                )
+                                
+                                if updated_excel:
+                                    mode_text = "updated" if broker_info['mode'] == 'update' else "inserted"
+                                    st.success(f"✅ Excel {mode_text} successfully for {detail['serial']}!")
+                                    
+                                    # Save the result
+                                    results.append({
+                                        "serial": detail["serial"],
+                                        "broker": detail["broker"],
+                                        "pdf_name": detail.get('name', detail['pdf'].name),
+                                        "updates": updates,
+                                        "mode": broker_info['mode']
+                                    })
+                                    
+                                    # Use the updated Excel for the next iteration
+                                    if idx < len(pdf_details) - 1:
+                                        # Create a file-like object for the next iteration
+                                        current_excel = io.BytesIO(updated_excel)
+                                        current_excel.name = "temp.xlsx"
+                                else:
+                                    st.error(f"❌ Failed to update Excel for {detail['serial']}")
+                    
+                    # Show summary and download
+                    if results:
+                        st.write("\n## 📊 Processing Summary")
+                        for result in results:
+                            st.write(f"• **{result['serial']}** ({result['broker']}): {result['mode']} - {len(result['updates'])} fields updated")
+                        
+                        st.write("\n## 📥 Download Results")
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.download_button(
+                                "📥 Download Updated Excel",
+                                updated_excel,
+                                f"UPDATED_MULTIPLE_{aircraft_model.replace(' ', '_')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        
+                        with col2:
+                            st.download_button(
+                                "💾 Download Original Backup",
+                                backup_excel,
+                                f"ORIGINAL_BACKUP_{aircraft_model.replace(' ', '_')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                    
+                    # Clear PDF entries after successful processing
+                    if process_mode == "Multiple PDFs" and results:
+                        st.session_state.pdf_entries = []
             else:
-                if not (serial_number and broker_name and pdf_file and excel_file):
-                    st.info("👆 Please fill in all fields and upload both files")
+                if not excel_file:
+                    st.info("👆 Please upload an Excel file")
+                elif not pdf_details:
+                    st.info("👆 Please add at least one PDF with details")
+                else:
+                    st.info("👆 Please fill in all serial numbers and broker names")
         else:
             st.info("👆 Please load a configuration file first to enable data processing")
     
