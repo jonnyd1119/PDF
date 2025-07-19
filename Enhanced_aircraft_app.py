@@ -27,6 +27,84 @@ class CompletePlatform:
             st.error(f"Error reading PDF: {e}")
             return ""
     
+    def generate_keyword_variations(self, base_keyword):
+        """Generate common variations of a keyword"""
+        variations = [base_keyword.lower()]
+        base_lower = base_keyword.lower()  # Define base_lower at the beginning
+        
+        # Handle Wi-Fi variations
+        if "wifi" in base_lower or "wi-fi" in base_lower:
+            variations.extend(["wifi", "wi-fi", "wi fi", "wireless", "wireless internet"])
+        
+        # Handle hyphenated words
+        if "-" in base_keyword:
+            # Add version without hyphen
+            variations.append(base_keyword.lower().replace("-", ""))
+            # Add version with space instead of hyphen
+            variations.append(base_keyword.lower().replace("-", " "))
+        
+        # Handle specific equipment variations
+        if "uns" in base_lower and "1espw" in base_lower:
+            variations.extend([
+                "uns-1espw", "uns 1espw", "uns1espw", 
+                "1espw", "uns-1e spw", "uns 1e spw",
+                "dual uns-1espw", "dual uns 1espw", "dual uns1espw"
+            ])
+        
+        # Handle equipment with just the model number
+        if "1espw" in base_lower:
+            variations.extend(["1espw", "1e spw", "1e-spw"])
+        
+        # Handle numbers with dots or dashes
+        if any(char.isdigit() for char in base_keyword):
+            # G-5000 -> G5000, G 5000
+            variations.append(base_keyword.lower().replace("-", ""))
+            variations.append(base_keyword.lower().replace("-", " "))
+            # 7.1 -> 7.1, 71, 7 1
+            variations.append(base_keyword.lower().replace(".", ""))
+            variations.append(base_keyword.lower().replace(".", " "))
+        
+        # Handle common abbreviations
+        abbreviation_map = {
+            "prebuy": ["prebuy", "pre-buy", "pre buy", "prebuy inspection", "pre-buy inspection"],
+            "tcas": ["tcas", "t-cas", "traffic collision avoidance system"],
+            "waas": ["waas", "wide area augmentation system"],
+            "ahrs": ["ahrs", "attitude heading reference system"],
+            "fms": ["fms", "flight management system"],
+            "apu": ["apu", "auxiliary power unit"],
+            "gps": ["gps", "global positioning system"],
+            "ads-b": ["ads-b", "adsb", "ads b", "automatic dependent surveillance"],
+            "cpdlc": ["cpdlc", "controller pilot data link"],
+            "fans": ["fans", "future air navigation system"],
+            "taws": ["taws", "terrain awareness warning system"],
+            "egpws": ["egpws", "enhanced ground proximity warning system"],
+            "synthetic vision": ["synthetic vision", "svt", "synthetic vision technology"],
+            "belted lav": ["belted lav", "belted lavatory", "bltd lav", "blted lav"],
+            "external lav": ["external lav", "external lavatory", "ext lav", "ext lavatory"]
+        }
+        
+        # Check if base keyword matches any known abbreviations
+        for key, values in abbreviation_map.items():
+            if key in base_lower or any(v in base_lower for v in values):
+                variations.extend(values)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_variations = []
+        for v in variations:
+            if v not in seen:
+                seen.add(v)
+                unique_variations.append(v)
+        
+        return unique_variations
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                full_text = "\n".join(page.extract_text() or '' for page in pdf.pages)
+            return full_text.lower()
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
+            return ""
+    
     def analyze_excel_for_new_model(self, excel_file):
         try:
             wb = load_workbook(excel_file)
@@ -167,6 +245,7 @@ class CompletePlatform:
                         "total_hours": ["TOTAL TIME SINCE NEW", "TOTAL HOURS", "HOURS SINCE NEW", "TTSN"],
                         "engine_overhaul": ["ENGINE TIME SINCE OVERHAUL", "ENGINE OVERHAUL", "TSOH"],
                         "engine_program": ["ENGINE PROGRAM", "ENGINE WARRANTY", "ENGINE PLAN"],
+                        "apu": ["APU", "AUXILIARY POWER UNIT"],
                         "apu_program": ["APU PROGRAM", "APU WARRANTY", "APU PLAN"],
                         "avionics_section": ["AVIONICS", "AVIONICS UPGRADES", "MISC AVIONICS"],
                         "number_of_seats": ["NUMBER OF SEATS", "SEATS", "SEATING"],
@@ -272,6 +351,7 @@ class CompletePlatform:
             "total_hours": "Total Hours Since New", 
             "engine_overhaul": "Engine Time Since Overhaul",
             "engine_program": "Engine Program",
+            "apu": "APU (Y/N)",
             "apu_program": "APU Program",
             "number_of_seats": "Number of Seats",
             "seat_configuration": "Seat Configuration",
@@ -397,6 +477,15 @@ class CompletePlatform:
                             value=", ".join(upgrade_info['keywords']),
                             key=f"upgrade_keywords_{upgrade_key}"
                         )
+                        
+                        # Show auto-generated variations
+                        if st.checkbox("Show variations", key=f"show_var_{upgrade_key}"):
+                            test_keywords = [kw.strip() for kw in keywords_input.split(",")]
+                            all_variations = []
+                            for kw in test_keywords:
+                                all_variations.extend(self.generate_keyword_variations(kw))
+                            unique_variations = list(set(all_variations))
+                            st.info(f"**Auto-generated variations**: {', '.join(unique_variations)}")
                 
                 if include_upgrade:
                     upgrade_mappings[upgrade_key] = {
@@ -533,7 +622,12 @@ class CompletePlatform:
                 r'hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
                 r'hours\s*/?\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
                 r'ttsn[:\s]*(\d{1,2}[,\.]?\d{3})',
-                r'total\s+hours[:\s]*(\d{1,2}[,\.]?\d{3})'
+                r'total\s+hours[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'total\s+time[:\s]*(\d{1,2}[,\.]?\d{3})',  # Added: catches "TOTAL TIME: 7,677"
+                r'total\s+time\s+(\d{1,2}[,\.]?\d{3})',      # Added: catches "TOTAL TIME 7,677"
+                r'tt[:\s]*(\d{1,2}[,\.]?\d{3})',             # Added: catches "TT: 7,677"
+                r'airframe\s+total[:\s]*(\d{1,2}[,\.]?\d{3})', # Added: catches "AIRFRAME TOTAL: 7,677"
+                r'aftt[:\s]*(\d{1,2}[,\.]?\d{3})'            # Added: catches "AFTT: 7,677"
             ]
             
             for pattern in total_hours_patterns:
@@ -617,7 +711,11 @@ class CompletePlatform:
             r'engines?\s*program[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
             r'engines?\s*warranty[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
             r'engines?\s*-\s*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
-            r'engine\s*maintenance[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)'
+            r'engine\s*maintenance[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
+            r'program[:\s]*([A-Za-z\s\-&]+?)(?:\s*\d+%|\s|$|\n)',  # Added: catches "Program: JSSI 100%"
+            r'engine\s*&\s*apu\s*status[^\\n]*program[:\s]*([A-Za-z\s\-&]+?)(?:\s*\d+%|\s|$|\n)',  # Added: catches under ENGINE & APU STATUS
+            r'engine\s*status[^\\n]*program[:\s]*([A-Za-z\s\-&]+?)(?:\s|$|\n)',  # Added: catches under ENGINE STATUS
+            r'maintenance\s*program[:\s]*([A-Za-z\s\-&]+?)(?:\s|$|\n)'  # Added: general maintenance program
         ]
         
         # If we have an engine section, search there first
@@ -748,7 +846,12 @@ class CompletePlatform:
             r'exterior\s*paint(?:ed)?\s*(?:in\s*)?(\d{4})',
             r'(\d{4})\s*(?:exterior\s*)?paint',
             r'paint\s*completed[:\s]*(\d{4})',
-            r'new\s*paint[:\s]*(\d{4})'
+            r'new\s*paint[:\s]*(\d{4})',
+            r'paint\s*exterior[:\s]*(\d{4})',  # Added: catches "Paint Exterior: 2023"
+            r'exterior[:\s]*(\d{4})',          # Added: catches "Exterior: 2023"
+            r'paint[^\\n]*(\d{4})',            # Added: catches any paint mention with year
+            r'exterior[^\\n]*paint[^\\n]*(\d{4})', # Added: catches "Exterior... Paint... 2023"
+            r'paint[^\\n]*exterior[^\\n]*(\d{4})'  # Added: catches "Paint... Exterior... 2023"
         ]
         
         for pattern in paint_patterns:
@@ -765,7 +868,13 @@ class CompletePlatform:
             r'(\d{4})\s*interior\s*(?:refurb|refresh|update)',
             r'new\s*interior[:\s]*(\d{4})',
             r'interior\s*year[:\s]*(\d{4})',
-            r'refurb(?:ished)?\s*in\s*(\d{4})'
+            r'refurb(?:ished)?\s*in\s*(\d{4})',
+            r'interior\s*paint[:\s]*(\d{4})',      # Added: catches "Interior Paint: 2023"
+            r'paint\s*interior[:\s]*(\d{4})',      # Added: catches "Paint Interior: 2023"
+            r'interior[:\s]*(\d{4})',              # Added: catches "Interior: 2023"
+            r'interior[^\\n]*(\d{4})',             # Added: catches any interior mention with year
+            r'cabin\s*(?:refurb|refresh|update)[:\s]*(\d{4})', # Added: catches cabin updates
+            r'cabin[^\\n]*(\d{4})'                 # Added: catches cabin with year
         ]
         
         for pattern in interior_patterns:
@@ -780,9 +889,17 @@ class CompletePlatform:
         upgrades = config.get("upgrades", {})
         for upgrade_name, upgrade_config in upgrades.items():
             keywords = upgrade_config.get("keywords", [])
-            found = False
             
+            # Generate variations for all keywords
+            all_keywords = []
             for keyword in keywords:
+                all_keywords.extend(self.generate_keyword_variations(keyword))
+            
+            # Remove duplicates
+            all_keywords = list(set(all_keywords))
+            
+            found = False
+            for keyword in all_keywords:
                 if keyword and keyword in pdf_text:
                     extracted_data[f"upgrade_{upgrade_name}"] = "Y"
                     found = True
