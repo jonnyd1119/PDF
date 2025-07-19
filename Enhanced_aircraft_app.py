@@ -1127,6 +1127,12 @@ class CompletePlatform:
                     
                     # For avionics rows, always copy formulas regardless of whether they're configured upgrades
                     if is_avionics_row:
+                        # Check if this is just the header row (contains "AVIONICS" in the label)
+                        label_cell = ws.cell(row=row, column=12).value
+                        if label_cell and isinstance(label_cell, str) and "AVIONICS" in label_cell.upper() and "UPGRADE" in label_cell.upper():
+                            # Skip the header row
+                            continue
+                        
                         # Copy main column
                         template_cell = ws.cell(row=row, column=adjacent_col)
                         new_cell = ws.cell(row=row, column=target_col)
@@ -1154,36 +1160,39 @@ class CompletePlatform:
                             
                             avionics_copied += 1
                         
-                        # Copy Y/N column - set to N by default unless we found it in PDF
-                        template_yn_cell = ws.cell(row=row, column=adjacent_col + 1)
-                        new_yn_cell = ws.cell(row=row, column=target_col + 1)
-                        
-                        # Check if this avionic item was found in PDF
-                        avionic_found = False
-                        for upgrade_name, upgrade_config in upgrades.items():
-                            if upgrade_config.get("row") == row:
-                                upgrade_key = f"upgrade_{upgrade_name}"
-                                if upgrade_key in extracted_data:
-                                    new_yn_cell.value = extracted_data[upgrade_key]
-                                    avionic_found = True
-                                    break
-                        
-                        if not avionic_found:
-                            # Default to N for avionics not found in PDF
-                            new_yn_cell.value = "N"
-                        
-                        # Copy Y/N cell formatting
-                        try:
-                            if template_yn_cell.font:
-                                new_yn_cell.font = Font(
-                                    name=template_yn_cell.font.name,
-                                    size=template_yn_cell.font.size,
-                                    bold=template_yn_cell.font.bold,
-                                    italic=template_yn_cell.font.italic,
-                                    color=template_yn_cell.font.color
-                                )
-                        except:
-                            pass
+                        # Only handle Y/N column if there's actually an avionic item in this row
+                        item_label = ws.cell(row=row, column=12).value
+                        if item_label and isinstance(item_label, str) and item_label.strip():
+                            # Copy Y/N column - set to N by default unless we found it in PDF
+                            template_yn_cell = ws.cell(row=row, column=adjacent_col + 1)
+                            new_yn_cell = ws.cell(row=row, column=target_col + 1)
+                            
+                            # Check if this avionic item was found in PDF
+                            avionic_found = False
+                            for upgrade_name, upgrade_config in upgrades.items():
+                                if upgrade_config.get("row") == row:
+                                    upgrade_key = f"upgrade_{upgrade_name}"
+                                    if upgrade_key in extracted_data:
+                                        new_yn_cell.value = extracted_data[upgrade_key]
+                                        avionic_found = True
+                                        break
+                            
+                            if not avionic_found:
+                                # Default to N for avionics not found in PDF
+                                new_yn_cell.value = "N"
+                            
+                            # Copy Y/N cell formatting
+                            try:
+                                if template_yn_cell.font:
+                                    new_yn_cell.font = Font(
+                                        name=template_yn_cell.font.name,
+                                        size=template_yn_cell.font.size,
+                                        bold=template_yn_cell.font.bold,
+                                        italic=template_yn_cell.font.italic,
+                                        color=template_yn_cell.font.color
+                                    )
+                            except:
+                                pass
                     
                     elif not is_data_row and not is_upgrade_row or is_special_formula_row:
                         # Copy formula from adjacent column for non-data, non-upgrade rows OR special formula rows
