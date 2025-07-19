@@ -1290,8 +1290,11 @@ class CompletePlatform:
                         updates.append(f"{upgrade_name} - Row {row_num}: {extracted_data[upgrade_key]}")
             
             try:
+                # Force automatic calculation and full recalculation on open
                 wb.calculation.calcMode = "automatic"
-                st.write("✅ **Set calculation mode to automatic**")
+                wb.calculation.calcOnSave = True
+                wb.calculation.fullCalcOnLoad = True
+                st.write("✅ **Set calculation mode to automatic with full calc on load**")
             except:
                 st.write("⚠️ **Could not set calculation mode**")
             
@@ -1640,6 +1643,13 @@ def main():
                         for result in results:
                             st.write(f"• **{result['serial']}** ({result['broker']}): {result['mode']} - {len(result['updates'])} fields updated")
                         
+                        # Show a preview of what was updated
+                        if st.checkbox("Show detailed updates"):
+                            for result in results:
+                                with st.expander(f"Updates for {result['serial']} - {result['broker']}"):
+                                    for update in result['updates']:
+                                        st.write(f"• {update}")
+                        
                         st.write("\n## 📥 Download Results")
                         col1, col2 = st.columns(2)
                         
@@ -1658,6 +1668,8 @@ def main():
                                 f"ORIGINAL_BACKUP_{aircraft_model.replace(' ', '_')}.xlsx",
                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
+                        
+                        st.info("📝 **Note**: When opening the downloaded Excel file, you may see 'Protected View'. Click 'Enable Editing' to see all formulas and values properly.")
                     
                     # Clear PDF entries after successful processing
                     if process_mode == "Multiple PDFs" and results:
