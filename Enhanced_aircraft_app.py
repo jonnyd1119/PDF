@@ -36,12 +36,131 @@ class CompletePlatform:
             
             field_analysis = {}
             potential_upgrades = {}
+            avionics_section = {"start": None, "end": None, "rows": []}
             
+            # First, find the AVIONICS UPGRADES section
+            for row in range(1, min(101, ws.max_row + 1)):
+                label_cell = ws.cell(row=row, column=12).value
+                if label_cell and isinstance(label_cell, str):
+                    label_upper = label_cell.upper().strip()
+                    
+                    # Check for AVIONICS UPGRADES header - be more flexible
+                    if ("AVIONICS" in label_upper and "UPGRADE" in label_upper) or label_upper == "AVIONICS UPGRADES":
+                        avionics_section["start"] = row + 1  # Start from next row
+                        st.write(f"🔍 **Found AVIONICS UPGRADES section starting at row {row + 1}**")
+                        
+                        # Now find where it ends - look for the next section header
+                        for end_row in range(row + 1, min(row + 50, ws.max_row + 1)):
+                            end_cell = ws.cell(row=end_row, column=12).value
+                            if end_cell and isinstance(end_cell, str):
+                                end_upper = end_cell.upper().strip()
+                                
+                                # Common section headers that indicate end of avionics
+                                if any(header in end_upper for header in ["INSPECTION", "INTERIOR", "EXTERIOR", "PAINT", "NOTES", "COMMENTS"]):
+                                    avionics_section["end"] = end_row - 1
+                                    st.write(f"🔍 **AVIONICS UPGRADES section ends at row {end_row - 1}**")
+                                    break
+                            elif not end_cell:
+                                # Empty cell might indicate end of section
+                                # Check if next few cells are also empty
+                                all_empty = True
+                                for check_row in range(end_row, min(end_row + 3, ws.max_row + 1)):
+                                    if ws.cell(row=check_row, column=12).value:
+                                        all_empty = False
+                                        break
+                                if all_empty:
+                                    avionics_section["end"] = end_row - 1
+                                    st.write(f"🔍 **AVIONICS UPGRADES section ends at row {end_row - 1} (empty rows)**")
+                                    break
+                        
+                        # If we found start but no clear end, set a reasonable limit
+                        if not avionics_section["end"]:
+                            avionics_section["end"] = min(avionics_section["start"] + 25, ws.max_row)
+                            st.write(f"🔍 **AVIONICS UPGRADES section ends at row {avionics_section['end']} (limit)**")
+                        
+                        break
+            
+            # Collect all avionics items
+            if avionics_section["start"] and avionics_section["end"]:
+                st.write(f"📋 **Collecting avionic items from rows {avionics_section['start']} to {avionics_section['end']}**")
+                for row in range(avionics_section["start"], avionics_section["end"] + 1):
+                    label_cell = ws.cell(row=row, column=12).value
+                    if label_cell and isinstance(label_cell, str) and label_cell.strip():
+                        item_name = label_cell.strip()
+                        avionics_section["rows"].append({
+                            "row": row,
+                            "label": item_name,
+                            "is_avionic": True
+                        })
+                        
+                        # Also add to potential upgrades
+                        upgrade_name = item_name.upper().replace(" ", "_").replace("-", "_")
+                        keywords = [item_name.lower()]
+                        if "-" in item_name:
+                            keywords.append(item_name.lower().replace("-", " "))
+                            keywords.append(item_name.lower().replace("-", ""))
+                        
+                        potential_upgrades[upgrade_name] = {
+                            "row": row,
+                            "label": item_name,
+                            "keywords": keywords,
+                            "is_yn": True,
+                            "is_avionic": True
+                        }
+                        
+                st.write(f"✅ **Found {len(avionics_section['rows'])} avionic items**")
+            
+            # First, scan the ITEM column (column 12) for items with default 'N' values
+            item_column_upgrades = {}
+            for row in range(1, min(101, ws.max_row + 1)):
+                item_cell = ws.cell(row=row, column=12).value  # Column L (12)
+                default_value_cell = ws.cell(row=row, column=13).value  # Column M (13)
+                
+                if item_cell and default_value_cell:
+                    item_text = str(item_cell).strip()
+                    default_value = str(default_value_cell).strip().upper()
+                    
+                    # If default value is 'N', this is likely an optional upgrade
+                    if default_value == 'N':
+                        # Skip generic terms
+                        skip_terms = ['INSPECTION', 'INSPECTIONS', 'NOTES', 'COMMENTS', 'REMARKS']
+                        if not any(skip == item_text.upper() for skip in skip_terms):
+                            upgrade_name = item_text.upper().replace(" ", "_")
+                            keywords = [item_text.lower()]
+                            
+                            # Add variations for common patterns
+                            if "-" in item_text:
+                                keywords.append(item_text.lower().replace("-", " "))
+                                keywords.append(item_text.lower().replace("-", ""))
+                            
+                            item_column_upgrades[upgrade_name] = {
+                                "row": row,
+                                "label": item_text,
+                                "keywords": keywords,
+                                "is_yn": True,
+                                "from_item_column": True
+                            }
+            
+            # Then scan for Y/N fields by looking at existing broker columns
+            yn_fields = {}
+            for col in range(17, min(ws.max_column + 1, 50), 2):  # Check Y/N columns
+                for row in range(1, min(101, ws.max_row + 1)):
+                    cell_value = ws.cell(row=row, column=col).value
+                    if cell_value and str(cell_value).strip().upper() in ['Y', 'N']:
+                        # Found a Y/N value, check what field it's for
+                        label_cell = ws.cell(row=row, column=12).value
+                        if label_cell and isinstance(label_cell, str):
+                            label_text = label_cell.strip()
+                            if label_text not in yn_fields:
+                                yn_fields[label_text] = row
+            
+            # Now scan labels and incorporate findings
             for row in range(1, min(101, ws.max_row + 1)):
                 label_cell = ws.cell(row=row, column=12).value
                 
                 if label_cell and isinstance(label_cell, str):
                     label_text = label_cell.upper().strip()
+                    label_text_original = label_cell.strip()
                     
                     field_mappings = {
                         "year_model": ["YEAR MODEL", "YEAR & MODEL", "MODEL YEAR"],
@@ -65,35 +184,74 @@ class CompletePlatform:
                                     "confidence": "high"
                                 }
                     
-                    upgrade_keywords = [
-                        "NXI", "G1000", "G3000", "WIFI", "TCAS", "WAAS", "FANS", "DUAL FMS", "HF",
-                        "AHRS", "FDR", "7.1 UPGRADE", "TCAS 7.1", "FLIGHT DATA RECORDER",
-                        "SYNTHETIC VISION", "SVT", "GOGO", "IRIDIUM", "CPDLC", "MTOW", "MZFW",
-                        "PREBUY INSPECTION", "PREBUY", "PRE-BUY", "INSPECTION", "DUAL UNS-1ESPW",
-                        "APU", "AUXILIARY POWER UNIT"
-                    ]
-                    
-                    for keyword in upgrade_keywords:
-                        if keyword in label_text:
-                            upgrade_name = keyword.replace(" ", "_").upper()
-                            if upgrade_name not in potential_upgrades:
-                                potential_upgrades[upgrade_name] = {
-                                    "row": row,
-                                    "label": label_cell,
-                                    "keywords": [keyword.lower()]
-                                }
+                    # Check if this is a Y/N field
+                    if label_text_original in yn_fields:
+                        # This is a Y/N upgrade field
+                        upgrade_name = label_text.replace(" ", "_")
+                        keywords = []
+                        
+                        # Skip generic INSPECTIONS row (but keep PREBUY INSPECTIONS)
+                        if label_text == "INSPECTIONS":
+                            continue
+                        
+                        # Generate keywords based on the label
+                        if "BELTED LAV" in label_text:
+                            keywords = ["belted lav", "belted lavatory", "bltd lav"]
+                        elif "EXTERNAL LAV" in label_text:
+                            keywords = ["external lav", "external lavatory", "ext lav"]
+                        elif "GARMIN" in label_text:
+                            keywords = [label_text_original.lower(), label_text_original.lower().replace("-", " ")]
+                        elif "PREBUY" in label_text or "PRE-BUY" in label_text:
+                            keywords = ["prebuy", "pre-buy", "pre buy", "prebuy inspection", "pre-buy inspection"]
+                        else:
+                            # Generic keywords from label
+                            keywords = [label_text_original.lower()]
+                        
+                        potential_upgrades[upgrade_name] = {
+                            "row": row,
+                            "label": label_cell,
+                            "keywords": keywords,
+                            "is_yn": True
+                        }
+                    else:
+                        # Check standard upgrade keywords
+                        upgrade_keywords = [
+                            "NXI", "G1000", "G3000", "G5000", "G-5000", "WIFI", "TCAS", "WAAS", "FANS", "DUAL FMS", "HF",
+                            "AHRS", "FDR", "7.1 UPGRADE", "TCAS 7.1", "FLIGHT DATA RECORDER",
+                            "SYNTHETIC VISION", "SVT", "GOGO", "IRIDIUM", "CPDLC", "MTOW", "MZFW",
+                            "PREBUY INSPECTION", "PREBUY", "PRE-BUY", "DUAL UNS-1ESPW",
+                            "APU", "AUXILIARY POWER UNIT", "BELTED LAV", "EXTERNAL LAV", "GARMIN"
+                        ]
+                        
+                        for keyword in upgrade_keywords:
+                            if keyword in label_text and label_text != "INSPECTIONS":  # Skip generic INSPECTIONS
+                                upgrade_name = keyword.replace(" ", "_").upper()
+                                if upgrade_name not in potential_upgrades:
+                                    potential_upgrades[upgrade_name] = {
+                                        "row": row,
+                                        "label": label_cell,
+                                        "keywords": [keyword.lower(), keyword.lower().replace("-", " ")]
+                                    }
+            
+            # Merge item column upgrades with detected upgrades
+            for upgrade_name, upgrade_info in item_column_upgrades.items():
+                if upgrade_name not in potential_upgrades:
+                    potential_upgrades[upgrade_name] = upgrade_info
             
             return {
                 "aircraft_model": aircraft_model,
                 "sheet_name": first_sheet_name,
                 "fields": field_analysis,
-                "upgrades": potential_upgrades
+                "upgrades": potential_upgrades,
+                "yn_fields_detected": len(yn_fields),
+                "item_upgrades_detected": len(item_column_upgrades),
+                "avionics_section": avionics_section
             }
         
         except Exception as e:
             st.error(f"Error analyzing Excel: {e}")
             return None
-
+    
     def create_configuration_interactive(self, analysis):
         st.subheader(f"🛩️ Configure: {analysis['aircraft_model']}")
         
@@ -101,6 +259,10 @@ class CompletePlatform:
             "Aircraft Model Name:", 
             value=analysis['aircraft_model']
         )
+        
+        # Store avionics section info in session state
+        if 'temp_avionics_section' not in st.session_state:
+            st.session_state.temp_avionics_section = analysis.get('avionics_section', {})
         
         st.write("## 📋 Core Fields Mapping")
         field_mappings = {}
@@ -110,6 +272,7 @@ class CompletePlatform:
             "total_hours": "Total Hours Since New", 
             "engine_overhaul": "Engine Time Since Overhaul",
             "engine_program": "Engine Program",
+            "apu_program": "APU Program",
             "number_of_seats": "Number of Seats",
             "seat_configuration": "Seat Configuration",
             "paint_exterior_year": "Paint Exterior Year",
@@ -120,9 +283,12 @@ class CompletePlatform:
         
         with col1:
             st.write("### Core Fields")
-            for field_key, field_name in list(core_fields.items())[:4]:
+            for field_key, field_name in list(core_fields.items())[:5]:
                 detected = analysis['fields'].get(field_key)
-                default_row = detected['row'] if detected else 20
+                if field_key == "apu_program":
+                    default_row = detected['row'] if detected else 34
+                else:
+                    default_row = detected['row'] if detected else 20
                 
                 row_input = st.number_input(
                     f"{field_name}:",
@@ -135,7 +301,7 @@ class CompletePlatform:
         
         with col2:
             st.write("### More Fields")
-            for field_key, field_name in list(core_fields.items())[4:]:
+            for field_key, field_name in list(core_fields.items())[5:]:
                 detected = analysis['fields'].get(field_key)
                 if field_key == "paint_exterior_year":
                     default_row = detected['row'] if detected else 60
@@ -154,6 +320,12 @@ class CompletePlatform:
                 field_mappings[field_key] = int(row_input)
         
         st.write("## 🔧 Upgrades Mapping")
+        
+        # Display avionics section info if found
+        avionics_info = analysis.get('avionics_section', {})
+        if avionics_info.get('rows'):
+            st.success(f"✅ Detected AVIONICS UPGRADES section with {len(avionics_info['rows'])} items (rows {avionics_info['start']}-{avionics_info['end']})")
+            st.info("These avionic items will be automatically copied with their formulas when adding new brokers")
         
         # Display detected Y/N fields
         if analysis.get('yn_fields_detected', 0) > 0:
@@ -202,7 +374,8 @@ class CompletePlatform:
                     include_upgrade = st.checkbox(
                         f"**{upgrade_key}**" + 
                         (" (Y/N field)" if upgrade_info.get('is_yn') else "") +
-                        (" [from ITEM column]" if upgrade_info.get('from_item_column') else ""),
+                        (" [from ITEM column]" if upgrade_info.get('from_item_column') else "") +
+                        (" [AVIONIC]" if upgrade_info.get('is_avionic') else ""),
                         value=True,
                         key=f"upgrade_{upgrade_key}"
                     )
@@ -237,7 +410,8 @@ class CompletePlatform:
         config = {
             aircraft_model: {
                 "row_mappings": field_mappings,
-                "upgrades": upgrade_mappings
+                "upgrades": upgrade_mappings,
+                "avionics_section": st.session_state.get('temp_avionics_section', {})
             }
         }
         return config
@@ -278,7 +452,11 @@ class CompletePlatform:
         return None
     
     def extract_data_from_pdf(self, pdf_text, aircraft_model):
-        config = st.session_state.configurations[aircraft_model]
+        config = st.session_state.configurations.get(aircraft_model)
+        if not config or not isinstance(config, dict):
+            st.error(f"❌ Invalid or missing configuration for {aircraft_model}")
+            return {}
+        
         extracted_data = {}
         row_mappings = config.get("row_mappings", {})
         
@@ -316,250 +494,345 @@ class CompletePlatform:
                     extracted_data["year_model"] = int(year_match.group(0))
                     break
         
-        # Total Hours - Improved to handle various formats
-        total_hours_patterns = [
-            r'(\d{1,2}[,\.]?\d{3})\s*airframe\s*hours\s*since\s*new',
-            r'airframe\s*hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'total\s+time\s+since\s+new[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'(\d{1,2}[,\.]?\d{3})\s*hours\s*since\s*new',
-            r'hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'hours\s*/?\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'ttsn[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'total\s+hours[:\s]*(\d{1,2}[,\.]?\d{3})'
-        ]
+        # Total Hours - Look specifically in ENGINE section
+        total_hours_found = False
         
-        for pattern in total_hours_patterns:
-            match = re.search(pattern, pdf_text, re.IGNORECASE)
-            if match:
-                hours_str = match.group(1).replace(",", "").replace(".", "")
-                hours_value = int(hours_str)
-                extracted_data["total_hours"] = hours_value
-                st.write(f"✅ **TOTAL HOURS FOUND**: {hours_value} (pattern: {pattern})")
-                break
+        # First try to find total hours in ENGINE section
+        engines_section_match = re.search(r'engines?\s*[:\-\s]*([\s\S]{0,800}?)(?=\n\n|\navionics|\ninterior|\nexterior|$)', pdf_text, re.IGNORECASE)
         
-        # Engine Overhaul - Handle format like "985/1227 Engine Hours Since Overhaul"
-        engine_patterns = [
-            r'(\d{3,4})/(\d{1,2}[,\.]?\d{3})\s*engine\s*hours\s*since\s*overhaul',  # Matches 985/1227 pattern
-            r'engine\s*hours\s*since\s*overhaul[:\s]*(\d{3,4})/(\d{1,2}[,\.]?\d{3})',
-            r'(\d{1,2}[,\.]?\d{3})\s*hours\s*since\s*overhaul',
-            r'hours\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'time\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'overhaul\s*hours[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'engines?\s*[\s\S]{0,200}?(\d{1,2}[,\.]?\d{3})\s*hours',
-            r'engine\s+time\s+since\s+overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
-            r'tsoh[:\s]*(\d{1,2}[,\.]?\d{3})'
-        ]
-        
-        engine_found = False
-        
-        # Check for the special format first (985/1227)
-        for pattern in engine_patterns[:2]:
-            match = re.search(pattern, pdf_text, re.IGNORECASE)
-            if match:
-                # For patterns with two groups, take the second (larger) number
-                if match.lastindex == 2:
-                    hours_str = match.group(2).replace(",", "").replace(".", "")
+        if engines_section_match:
+            engines_text = engines_section_match.group(1)
+            
+            # Look for total time patterns within engine section
+            engine_total_patterns = [
+                r'engine\s*time\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'engine\s*ttsn[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'engine\s*total\s*time[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'total\s*time[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'(\d{1,2}[,\.]?\d{3})\s*hours?\s*total',
+                r'(\d{1,2}[,\.]?\d{3})\s*total\s*hours?'
+            ]
+            
+            for pattern in engine_total_patterns:
+                match = re.search(pattern, engines_text, re.IGNORECASE)
+                if match:
+                    hours_str = match.group(1).replace(",", "").replace(".", "")
                     hours_value = int(hours_str)
-                    extracted_data["engine_overhaul"] = hours_value
-                    st.write(f"✅ **ENGINE OVERHAUL FOUND (from dual format)**: {hours_value}")
-                    engine_found = True
+                    extracted_data["total_hours"] = hours_value
+                    st.write(f"✅ **TOTAL HOURS FOUND IN ENGINE SECTION**: {hours_value}")
+                    total_hours_found = True
                     break
         
-        # If not found in dual format, try other patterns
-        if not engine_found:
-            # Try to find an ENGINES section
-            engines_section_match = re.search(r'engines?\s*[:\-\s]*([\s\S]{0,500}?)(?=\n\n|\navionics|\ninterior|\nexterior|$)', pdf_text, re.IGNORECASE)
+        # If not found in engine section, fall back to general patterns
+        if not total_hours_found:
+            total_hours_patterns = [
+                r'(\d{1,2}[,\.]?\d{3})\s*airframe\s*hours\s*since\s*new',
+                r'airframe\s*hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'total\s+time\s+since\s+new[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'(\d{1,2}[,\.]?\d{3})\s*hours\s*since\s*new',
+                r'hours\s*since\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'hours\s*/?\s*new[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'ttsn[:\s]*(\d{1,2}[,\.]?\d{3})',
+                r'total\s+hours[:\s]*(\d{1,2}[,\.]?\d{3})'
+            ]
             
-            if engines_section_match:
-                engines_text = engines_section_match.group(1)
-                # Look for hours in the engines section
-                hours_match = re.search(r'(\d{1,2}[,\.]?\d{3})\s*hours', engines_text, re.IGNORECASE)
-                if hours_match:
-                    hours_str = hours_match.group(1).replace(",", "").replace(".", "")
+            for pattern in total_hours_patterns:
+                match = re.search(pattern, pdf_text, re.IGNORECASE)
+                if match:
+                    hours_str = match.group(1).replace(",", "").replace(".", "")
                     hours_value = int(hours_str)
-                    extracted_data["engine_overhaul"] = hours_value
-                    st.write(f"✅ **ENGINE OVERHAUL FOUND IN ENGINES SECTION**: {hours_value}")
-                    engine_found = True
-            
-            # Try remaining patterns
-            if not engine_found:
-                for pattern in engine_patterns[2:]:
-                    match = re.search(pattern, pdf_text, re.IGNORECASE)
-                    if match:
-                        hours_str = match.group(1).replace(",", "").replace(".", "")
-                        hours_value = int(hours_str)
-                        extracted_data["engine_overhaul"] = hours_value
-                        st.write(f"✅ **ENGINE OVERHAUL FOUND**: {hours_value}")
-                        engine_found = True
-                        break
+                    extracted_data["total_hours"] = hours_value
+                    st.write(f"✅ **TOTAL HOURS FOUND**: {hours_value} (pattern: {pattern})")
+                    break
         
-        # If no engine overhaul found, default to total hours
-        if not engine_found and "total_hours" in extracted_data:
-            extracted_data["engine_overhaul"] = extracted_data["total_hours"]
-            st.write(f"⚠️ **ENGINE OVERHAUL defaulted to total hours**: {extracted_data['total_hours']}")
-        
-        # Number of Seats
-        seat_patterns = [r'(\w+)\s+\(\d+\)\s+passenger', r'(\d+)\s+passengers?']
-        number_mappings = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10"}
-        
-        for pattern in seat_patterns:
-            match = re.search(pattern, pdf_text, re.IGNORECASE)
-            if match:
-                seat_info = match.group(1).lower()
-                if seat_info in number_mappings:
-                    digit = number_mappings[seat_info]
-                elif seat_info.isdigit():
-                    digit = seat_info
-                else:
-                    continue
-                
-                match_context = pdf_text[max(0, match.start()-200):match.end()+200]
-                if re.search(r'lavatory|lav\b|belted\s+lav', match_context, re.IGNORECASE):
-                    result = f"{digit} SEATS + BLTD LAV"
-                else:
-                    result = f"{digit} SEATS"
-                
-                extracted_data["number_of_seats"] = result
-                break
-        
-        # Seat Configuration - NEW LOGIC
-        seat_config_patterns = [
-            r'forward.*?two.*?place.*?divan',
-            r'center.*?4.*?place.*?club',
-            r'two.*?individual.*?forward.*?facing.*?seats',
-            r'belted.*?lav'
+        # Engine Overhaul - Look for various patterns
+        engine_overhaul_patterns = [
+            r'engine\s*time\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'engine\s*tsoh[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'hours?\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'time\s*since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'overhaul\s*hours?[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'tsoh[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'since\s*overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'(\d{1,2}[,\.]?\d{3})\s*hours?\s*since\s*overhaul',
+            r'(\d{1,2}[,\.]?\d{3})\s*tsoh',
+            r'(\d{1,2}[,\.]?\d{3})\s*since\s*overhaul',
+            r'overhaul[:\s]*(\d{1,2}[,\.]?\d{3})',
+            r'soh[:\s]*(\d{1,2}[,\.]?\d{3})'  # Sometimes abbreviated as SOH
         ]
         
-        seat_config_parts = []
+        engine_overhaul_found = False
         
-        # Look for specific seating configurations
-        if re.search(r'forward.*?two.*?place.*?divan', pdf_text, re.IGNORECASE):
-            seat_config_parts.append("FWD 2 PLC DIV")
+        # First try to find in ENGINE section if we have it
+        if engines_section_match:
+            engines_text = engines_section_match.group(1)
+            
+            for pattern in engine_overhaul_patterns:
+                matches = re.findall(pattern, engines_text, re.IGNORECASE)
+                if matches:
+                    # Try each match to find a reasonable value
+                    for match in matches:
+                        hours_str = match.replace(",", "").replace(".", "")
+                        hours_value = int(hours_str)
+                        # Only accept reasonable overhaul hours (typically less than total hours)
+                        if 100 <= hours_value <= 50000:  # Reasonable range
+                            extracted_data["engine_overhaul"] = hours_value
+                            st.write(f"✅ **ENGINE OVERHAUL FOUND IN ENGINE SECTION**: {hours_value}")
+                            engine_overhaul_found = True
+                            break
+                if engine_overhaul_found:
+                    break
         
-        if re.search(r'(center|mid).*?4.*?place.*?club', pdf_text, re.IGNORECASE):
-            seat_config_parts.append("MID 4 PLC CLB")
+        # If not found in engine section, try the whole document
+        if not engine_overhaul_found:
+            for pattern in engine_overhaul_patterns:
+                matches = re.findall(pattern, pdf_text, re.IGNORECASE)
+                if matches:
+                    for match in matches:
+                        hours_str = match.replace(",", "").replace(".", "")
+                        hours_value = int(hours_str)
+                        # Only accept reasonable overhaul hours
+                        if 100 <= hours_value <= 50000:
+                            extracted_data["engine_overhaul"] = hours_value
+                            st.write(f"✅ **ENGINE OVERHAUL FOUND**: {hours_value}")
+                            engine_overhaul_found = True
+                            break
+                if engine_overhaul_found:
+                    break
         
-        if re.search(r'two.*?individual.*?forward.*?facing.*?seats', pdf_text, re.IGNORECASE):
-            seat_config_parts.append("AFT DUAL FWD FCING SEATS")
-        elif re.search(r'individual.*?seats', pdf_text, re.IGNORECASE):
-            seat_config_parts.append("INDIV SEATS")
+        # If still not found, default to total hours
+        if not engine_overhaul_found and "total_hours" in extracted_data:
+            extracted_data["engine_overhaul"] = extracted_data["total_hours"]
+            st.write(f"⚠️ **ENGINE OVERHAUL not found, defaulting to TOTAL HOURS**: {extracted_data['total_hours']}")
         
-        if re.search(r'belted.*?lav', pdf_text, re.IGNORECASE):
-            seat_config_parts.append("BLTD LAV")
+        # Engine Program - Look for specific phrases near "engine"
+        engine_program_found = False
         
-        if seat_config_parts:
-            extracted_data["seat_configuration"] = ",".join(seat_config_parts)
-            st.write(f"✅ **SEAT CONFIGURATION FOUND**: {extracted_data['seat_configuration']}")
+        # First, look specifically for engine program mentions
+        engine_context_patterns = [
+            r'engines?\s*(?:are\s*)?enrolled\s*in\s*([A-Za-z\s\-&]+?)(?:\s*full|\s*engine|\s*program|\.|\n|$)',
+            r'both\s*engines?\s*(?:are\s*)?enrolled\s*in\s*([A-Za-z\s\-&]+?)(?:\s*full|\s*engine|\s*program|\.|\n|$)',
+            r'engines?\s*(?:are\s*)?(?:on|under)\s*([A-Za-z\s\-&]+?)\s*(?:program|warranty|plan|coverage)',
+            r'([A-Za-z\s\-&]+?)\s*full\s*engine\s*program',
+            r'engines?\s*program[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
+            r'engines?\s*warranty[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
+            r'engines?\s*-\s*([A-Za-z\s\-&]+?)(?:\n|$|\.)',
+            r'engine\s*maintenance[:\s]*([A-Za-z\s\-&]+?)(?:\n|$|\.)'
+        ]
         
-        # Paint Exterior Year - IMPROVED LOGIC
+        # If we have an engine section, search there first
+        if engines_section_match:
+            engines_text = engines_section_match.group(1)
+            
+            for pattern in engine_context_patterns:
+                match = re.search(pattern, engines_text, re.IGNORECASE)
+                if match:
+                    program = match.group(1).strip()
+                    st.write(f"🔍 **Found potential engine program in engine section**: {program}")
+                    
+                    # Clean up the program name
+                    program = program.strip().rstrip('.').rstrip(',')
+                    
+                    # Map to standard abbreviations
+                    program_mapping = {
+                        'jssi': 'JSSI',
+                        'power advantage': 'PWR ADV',
+                        'poweradvantage': 'PWR ADV',
+                        'esp gold lite': 'ESP GOLD LITE',
+                        'esp gold': 'ESP GOLD',
+                        'esp': 'ESP',
+                        'msp': 'MSP',
+                        'csp': 'CSP',
+                        'tap': 'TAP',
+                        'tap blue': 'TAP BLUE',
+                        'smart parts': 'SMART PARTS'
+                    }
+                    
+                    program_lower = program.lower()
+                    for key, value in program_mapping.items():
+                        if key in program_lower:
+                            extracted_data["engine_program"] = value
+                            st.write(f"✅ **ENGINE PROGRAM FOUND**: {value}")
+                            engine_program_found = True
+                            break
+                    
+                    if engine_program_found:
+                        break
+        
+        # If not found in engine section, search the whole document
+        if not engine_program_found:
+            for pattern in engine_context_patterns:
+                match = re.search(pattern, pdf_text, re.IGNORECASE)
+                if match:
+                    program = match.group(1).strip()
+                    
+                    # Skip if it contains "avionics"
+                    if "avionics" in program.lower():
+                        continue
+                    
+                    st.write(f"🔍 **Found potential engine program**: {program}")
+                    
+                    # Clean up
+                    program = program.strip().rstrip('.').rstrip(',')
+                    
+                    # Map to standard abbreviations
+                    program_mapping = {
+                        'jssi': 'JSSI',
+                        'power advantage': 'PWR ADV',
+                        'poweradvantage': 'PWR ADV',
+                        'esp gold lite': 'ESP GOLD LITE',
+                        'esp gold': 'ESP GOLD',
+                        'esp': 'ESP',
+                        'msp': 'MSP',
+                        'csp': 'CSP',
+                        'tap': 'TAP',
+                        'tap blue': 'TAP BLUE',
+                        'smart parts': 'SMART PARTS'
+                    }
+                    
+                    program_lower = program.lower()
+                    for key, value in program_mapping.items():
+                        if key in program_lower:
+                            extracted_data["engine_program"] = value
+                            st.write(f"✅ **ENGINE PROGRAM FOUND**: {value}")
+                            engine_program_found = True
+                            break
+                    
+                    if engine_program_found:
+                        break
+                    
+                    # If no mapping but seems valid, use it
+                    if len(program) > 2 and len(program) < 20 and not any(skip in program.lower() for skip in ['avionics', 'triple', 'dual', 'honeywell']):
+                        extracted_data["engine_program"] = program.upper()
+                        engine_program_found = True
+                        break
+        
+        # Number of Seats - Append " SEATS" to the number
+        seats_patterns = [
+            r'(\d+)\s*passenger\s*seat(?:ing|s)?',
+            r'number\s*of\s*seats[:\s]*(\d+)',
+            r'seats[:\s]*(\d+)',
+            r'(\d+)\s*seat(?:s)?\s*(?:configuration|config)',
+            r'seating\s*for\s*(\d+)',
+            r'(\d+)\s*pax'
+        ]
+        
+        for pattern in seats_patterns:
+            match = re.search(pattern, pdf_text, re.IGNORECASE)
+            if match:
+                seats = int(match.group(1))
+                if 1 <= seats <= 20:
+                    extracted_data["number_of_seats"] = f"{seats} SEATS"
+                    st.write(f"✅ **NUMBER OF SEATS FOUND**: {seats} SEATS")
+                    break
+        
+        # Seat Configuration
+        config_patterns = [
+            r'(?:seat(?:ing)?\s*)?config(?:uration)?[:\s]*([^\n]+)',
+            r'cabin\s*config(?:uration)?[:\s]*([^\n]+)',
+            r'interior\s*(?:features|has|with)[:\s]*([^\n]*(?:club|divan|forward facing|aft facing)[^\n]*)',
+            r'(\d+\s*place\s*(?:club|divan)|forward\s*facing|aft\s*facing|center\s*club|double\s*club)[^\n]*'
+        ]
+        
+        for pattern in config_patterns:
+            match = re.search(pattern, pdf_text, re.IGNORECASE)
+            if match:
+                seat_config = match.group(1).strip()
+                if len(seat_config) > 5 and len(seat_config) < 200:
+                    extracted_data["seat_configuration"] = seat_config
+                    break
+        
+        # Paint Exterior Year
         paint_patterns = [
-            r'painted\s+in\s+(20\d{2})',
-            r'paint.*?(20\d{2})',
-            r'exterior.*?paint.*?(20\d{2})',
-            r'(20\d{2}).*?exterior.*?paint'
+            r'paint(?:ed)?\s*(?:in\s*)?(\d{4})',
+            r'exterior\s*paint(?:ed)?\s*(?:in\s*)?(\d{4})',
+            r'(\d{4})\s*(?:exterior\s*)?paint',
+            r'paint\s*completed[:\s]*(\d{4})',
+            r'new\s*paint[:\s]*(\d{4})'
         ]
         
         for pattern in paint_patterns:
             match = re.search(pattern, pdf_text, re.IGNORECASE)
             if match:
-                year = match.group(1)
-                extracted_data["paint_exterior_year"] = year
-                st.write(f"✅ **PAINT EXTERIOR YEAR FOUND**: {year}")
-                break
+                year = int(match.group(1))
+                if 1990 <= year <= 2030:
+                    extracted_data["paint_exterior_year"] = year
+                    break
         
-        # Interior Year - IMPROVED LOGIC
+        # Interior Year
         interior_patterns = [
-            r'interior.*?refurb.*?(20\d{2})',
-            r'interior.*?(20\d{2})',
-            r'(20\d{2}).*?interior.*?refurb',
-            r'new.*?interior.*?(20\d{2})'
+            r'interior\s*(?:refurb(?:ished)?|completed|done|new)\s*(?:in\s*)?(\d{4})',
+            r'(\d{4})\s*interior\s*(?:refurb|refresh|update)',
+            r'new\s*interior[:\s]*(\d{4})',
+            r'interior\s*year[:\s]*(\d{4})',
+            r'refurb(?:ished)?\s*in\s*(\d{4})'
         ]
         
         for pattern in interior_patterns:
             match = re.search(pattern, pdf_text, re.IGNORECASE)
             if match:
-                year = match.group(1)
-                extracted_data["interior_year"] = year
-                st.write(f"✅ **INTERIOR YEAR FOUND**: {year}")
-                break
+                year = int(match.group(1))
+                if 1990 <= year <= 2030:
+                    extracted_data["interior_year"] = year
+                    break
         
-        # Engine Programs
-        if "jssi" in pdf_text:
-            extracted_data["engine_program"] = "JSSI"
-        elif "msp gold" in pdf_text:
-            extracted_data["engine_program"] = "MSP GOLD"
-        
-
-        
-        # APU Program - Always include this field as Y/N
-        apu_keywords = ["apu", "auxiliary power unit"]
-        apu_found = False
-        
-        for keyword in apu_keywords:
-            if keyword in pdf_text:
-                apu_found = True
-                break
-        
-        # Always set APU field - Y if found, N if not
-        if "apu_program" in row_mappings:
-            if apu_found and "jssi" in pdf_text:
-                extracted_data["apu_program"] = "JSSI"
-            elif apu_found and "msp" in pdf_text:
-                extracted_data["apu_program"] = "MSP"
-            else:
-                extracted_data["apu_program"] = "NONE"
-        
-        # Upgrades
+        # Extract Upgrades
         upgrades = config.get("upgrades", {})
-        
-        # Check for APU as a Y/N upgrade field
         for upgrade_name, upgrade_config in upgrades.items():
-            if "APU" in upgrade_name.upper():
-                # This is an APU Y/N field
-                extracted_data[f"upgrade_{upgrade_name}"] = "Y" if apu_found else "N"
-                st.write(f"✅ **APU Y/N FIELD**: {extracted_data[f'upgrade_{upgrade_name}']}")
-        
-        # Process all other upgrades
-        for upgrade_name, upgrade_config in upgrades.items():
-            if not upgrade_name.startswith("upgrade_"):  # Skip if already processed
-                upgrade_key = f"upgrade_{upgrade_name}"
-                if upgrade_key not in extracted_data:  # Only process if not already set
-                    keywords = upgrade_config.get("keywords", [])
-                    found = False
-                    
-                    # Check each keyword
-                    for keyword in keywords:
-                        if keyword and re.search(re.escape(keyword), pdf_text, re.IGNORECASE):
-                            found = True
-                            st.write(f"✅ **UPGRADE MATCH**: {upgrade_name} found with keyword '{keyword}'")
-                            break
-                    
-                    extracted_data[upgrade_key] = "Y" if found else "N"
+            keywords = upgrade_config.get("keywords", [])
+            found = False
+            
+            for keyword in keywords:
+                if keyword and keyword in pdf_text:
+                    extracted_data[f"upgrade_{upgrade_name}"] = "Y"
+                    found = True
+                    st.write(f"✅ **Upgrade found**: {upgrade_name} (keyword: {keyword})")
+                    break
+            
+            if not found:
+                extracted_data[f"upgrade_{upgrade_name}"] = "N"
         
         return extracted_data
     
     def find_broker_row(self, ws):
+        """Find the row containing 'BROKER' label in column 12."""
         for row in range(1, min(50, ws.max_row + 1)):
             label_cell = ws.cell(row=row, column=12).value
             if label_cell and isinstance(label_cell, str):
                 if "broker" in label_cell.lower():
-                    st.write(f"✅ **Found BROKER row**: {row} ('{label_cell}')")
                     return row
-        st.write("⚠️ **BROKER row not found, using default row 5**")
-        return 5
+        return 5  # Default to row 5 if not found
     
     def shift_formulas_in_cell(self, cell, shift_amount):
-        if not cell.value or not isinstance(cell.value, str) or not cell.value.startswith('='):
+        """
+        Shift column references in Excel formulas while preserving absolute references.
+        Absolute references (like $N45) are not shifted.
+        """
+        if not cell.value or not isinstance(cell.value, str):
+            return
+        
+        if not cell.value.startswith('='):
             return
         
         formula = cell.value
         
-        def shift_column_ref(match):
-            col_ref = match.group(1)
-            row_ref = match.group(2)
+        # Pattern to match column references, including absolute ones
+        # This will match: A1, $A1, $A$1, A$1
+        pattern = r'(\$?)([A-Z]+)(\$?)(\d+)'
+        
+        def replace_ref(match):
+            dollar1 = match.group(1)  # $ before column (if any)
+            col_letters = match.group(2)  # Column letters
+            dollar2 = match.group(3)  # $ before row (if any)
+            row_num = match.group(4)  # Row number
             
+            # If column is absolute (has $ before it), do not shift
+            if dollar1 == '$':
+                return match.group(0)  # Return unchanged
+            
+            # Otherwise, shift the column
             col_num = 0
-            for char in col_ref:
+            for char in col_letters:
                 col_num = col_num * 26 + (ord(char) - ord('A') + 1)
             
             new_col_num = col_num + shift_amount
@@ -570,15 +843,15 @@ class CompletePlatform:
                 new_col_ref = chr(new_col_num % 26 + ord('A')) + new_col_ref
                 new_col_num //= 26
             
-            return f"{new_col_ref}{row_ref}"
+            return f"{dollar1}{new_col_ref}{dollar2}{row_num}"
         
-        pattern = r'([A-Z]+)(\d+)'
-        new_formula = re.sub(pattern, shift_column_ref, formula)
+        new_formula = re.sub(pattern, replace_ref, formula)
         
         if new_formula != formula:
             cell.value = new_formula
     
     def find_insertion_point(self, excel_file, serial_number):
+        """Find the correct column position to insert a new broker based on serial number order."""
         try:
             excel_content = excel_file.read()
             excel_file.seek(0)
@@ -784,7 +1057,191 @@ class CompletePlatform:
                         source_cell.value = None
                         source_yn_cell.value = None
             
-            # Step 2: Add serial number (last 4 digits only) and broker name
+            # Step 2: Find adjacent broker column to copy formulas from
+            adjacent_col = None
+            if target_col > 16:  # If not the first broker column
+                # Use the column to the left as template
+                adjacent_col = target_col - 2
+            elif insertion_info['serial_positions']:  # If first position but others exist
+                # Use the next column as template
+                adjacent_col = target_col + 2
+            
+            # Step 3: Copy formulas from adjacent column (including avionics section)
+            formulas_copied = 0
+            avionics_copied = 0
+            
+            if adjacent_col and adjacent_col <= ws.max_column:
+                st.write(f"📋 **Copying formulas from column {adjacent_col}**")
+                
+                # Get avionics section info if available
+                avionics_section = config.get("avionics_section", {})
+                avionics_start = avionics_section.get("start")
+                avionics_end = avionics_section.get("end")
+                
+                for row in range(1, ws.max_row + 1):
+                    # Skip certain rows that should have data, not formulas
+                    if row == 1 or row == self.find_broker_row(ws):  # Serial number and broker rows
+                        continue
+                    
+                    # Check if this row is in the avionics section
+                    is_avionics_row = False
+                    if avionics_start and avionics_end and avionics_start <= row <= avionics_end:
+                        is_avionics_row = True
+                    
+                    # Check if this row is in our configured fields (these get data, not formulas)
+                    is_data_row = any(row == row_num for row_num in row_mappings.values())
+                    
+                    # Also check if this is an upgrade row (but NOT in avionics section)
+                    upgrades = config.get("upgrades", {})
+                    is_upgrade_row = any(row == upgrade_config.get("row") for upgrade_config in upgrades.values()) and not is_avionics_row
+                    
+                    # Special handling for certain rows that should ALWAYS get formulas
+                    # Get the actual row numbers from configuration
+                    special_formula_rows = []
+                    
+                    # APU row (if configured)
+                    apu_row = config.get("row_mappings", {}).get("apu_program")
+                    if apu_row:
+                        special_formula_rows.append(apu_row)
+                    
+                    # Check upgrades for rows that need formulas
+                    for upgrade_name, upgrade_config in upgrades.items():
+                        # Add any upgrade that typically has formulas
+                        if any(keyword in upgrade_name for keyword in ["BELTED_LAV", "EXTERNAL_LAV", "DELIVERY_TO_THE_US", "DELIVERY", "APU"]):
+                            upgrade_row = upgrade_config.get("row")
+                            if upgrade_row:
+                                special_formula_rows.append(upgrade_row)
+                    
+                    # Also add row 34 explicitly for APU if not already included
+                    if 34 not in special_formula_rows:
+                        special_formula_rows.append(34)
+                    
+                    # Add row 29 for DELIVERY TO THE US
+                    if 29 not in special_formula_rows:
+                        special_formula_rows.append(29)
+                    
+                    # Remove None values and ensure we have integers
+                    special_formula_rows = [int(r) for r in special_formula_rows if r is not None]
+                    
+                    is_special_formula_row = row in special_formula_rows
+                    
+                    # For avionics rows, always copy formulas regardless of whether they're configured upgrades
+                    if is_avionics_row:
+                        # Copy main column
+                        template_cell = ws.cell(row=row, column=adjacent_col)
+                        new_cell = ws.cell(row=row, column=target_col)
+                        
+                        if template_cell.value:
+                            new_cell.value = template_cell.value
+                            
+                            # If it's a formula, adjust references
+                            if isinstance(template_cell.value, str) and template_cell.value.startswith('='):
+                                col_shift = target_col - adjacent_col
+                                self.shift_formulas_in_cell(new_cell, col_shift)
+                            
+                            # Copy formatting
+                            try:
+                                if template_cell.font:
+                                    new_cell.font = Font(
+                                        name=template_cell.font.name,
+                                        size=template_cell.font.size,
+                                        bold=template_cell.font.bold,
+                                        italic=template_cell.font.italic,
+                                        color=template_cell.font.color
+                                    )
+                            except:
+                                pass
+                            
+                            avionics_copied += 1
+                        
+                        # Copy Y/N column - set to N by default unless we found it in PDF
+                        template_yn_cell = ws.cell(row=row, column=adjacent_col + 1)
+                        new_yn_cell = ws.cell(row=row, column=target_col + 1)
+                        
+                        # Check if this avionic item was found in PDF
+                        avionic_found = False
+                        for upgrade_name, upgrade_config in upgrades.items():
+                            if upgrade_config.get("row") == row:
+                                upgrade_key = f"upgrade_{upgrade_name}"
+                                if upgrade_key in extracted_data:
+                                    new_yn_cell.value = extracted_data[upgrade_key]
+                                    avionic_found = True
+                                    break
+                        
+                        if not avionic_found:
+                            # Default to N for avionics not found in PDF
+                            new_yn_cell.value = "N"
+                        
+                        # Copy Y/N cell formatting
+                        try:
+                            if template_yn_cell.font:
+                                new_yn_cell.font = Font(
+                                    name=template_yn_cell.font.name,
+                                    size=template_yn_cell.font.size,
+                                    bold=template_yn_cell.font.bold,
+                                    italic=template_yn_cell.font.italic,
+                                    color=template_yn_cell.font.color
+                                )
+                        except:
+                            pass
+                    
+                    elif not is_data_row and not is_upgrade_row or is_special_formula_row:
+                        # Copy formula from adjacent column for non-data, non-upgrade rows OR special formula rows
+                        template_cell = ws.cell(row=row, column=adjacent_col)
+                        new_cell = ws.cell(row=row, column=target_col)
+                        
+                        if template_cell.value and isinstance(template_cell.value, str) and template_cell.value.startswith('='):
+                            # Copy the formula
+                            new_cell.value = template_cell.value
+                            
+                            # Adjust the formula references
+                            col_shift = target_col - adjacent_col
+                            self.shift_formulas_in_cell(new_cell, col_shift)
+                            
+                            # Copy formatting
+                            try:
+                                if template_cell.font:
+                                    new_cell.font = Font(
+                                        name=template_cell.font.name,
+                                        size=template_cell.font.size,
+                                        bold=template_cell.font.bold,
+                                        italic=template_cell.font.italic,
+                                        color=template_cell.font.color
+                                    )
+                            except:
+                                pass
+                            
+                            formulas_copied += 1
+                        
+                        # Also check Y/N column for formulas
+                        template_yn_cell = ws.cell(row=row, column=adjacent_col + 1)
+                        new_yn_cell = ws.cell(row=row, column=target_col + 1)
+                        
+                        if template_yn_cell.value and isinstance(template_yn_cell.value, str) and template_yn_cell.value.startswith('='):
+                            new_yn_cell.value = template_yn_cell.value
+                            self.shift_formulas_in_cell(new_yn_cell, col_shift)
+                            
+                            try:
+                                if template_yn_cell.font:
+                                    new_yn_cell.font = Font(
+                                        name=template_yn_cell.font.name,
+                                        size=template_yn_cell.font.size,
+                                        bold=template_yn_cell.font.bold,
+                                        italic=template_yn_cell.font.italic,
+                                        color=template_yn_cell.font.color
+                                    )
+                            except:
+                                pass
+                            
+                            formulas_copied += 1
+                
+                if formulas_copied > 0:
+                    st.write(f"✅ **Copied {formulas_copied} formulas from adjacent column**")
+                
+                if avionics_copied > 0:
+                    st.write(f"✅ **Copied {avionics_copied} avionic items with formulas**")
+            
+            # Step 4: Add serial number (last 4 digits only) and broker name
             display_serial = insertion_info.get('display_serial', serial_number[-4:])
             
             ws.cell(row=1, column=target_col).value = display_serial
@@ -800,14 +1257,14 @@ class CompletePlatform:
                 broker_cell.value = insertion_info.get('broker', 'Unknown Broker').upper()  # Convert to uppercase
                 updates.append(f"Broker Name - Row {broker_row}: {insertion_info.get('broker', 'Unknown Broker').upper()}")
             
-            # Step 3: Add extracted data
+            # Step 5: Add extracted data
             for field, row_num in row_mappings.items():
                 if field in extracted_data and row_num != 1 and row_num != broker_row:
                     new_value = extracted_data[field]
                     ws.cell(row=row_num, column=target_col).value = new_value
                     updates.append(f"{field} - Row {row_num}: {new_value}")
             
-            # Step 4: Add upgrade data
+            # Step 6: Add upgrade data
             upgrades = config.get("upgrades", {})
             for upgrade_name, upgrade_config in upgrades.items():
                 upgrade_key = f"upgrade_{upgrade_name}"
@@ -830,7 +1287,7 @@ class CompletePlatform:
                 st.write("⚠️ **Could not set calculation mode**")
             
             wb.save(tmp_path)
-            st.write("✅ **New row inserted successfully**")
+            st.write("✅ **New row inserted successfully with formulas copied**")
             
             with open(tmp_path, "rb") as f:
                 updated_excel_data = f.read()
@@ -947,6 +1404,14 @@ def main():
         for model in st.session_state.configurations.keys():
             st.sidebar.write(f"• {model}")
         
+        # Debug: show configuration structure
+        if st.sidebar.checkbox("Show Config Structure (Debug)"):
+            for model, config in st.session_state.configurations.items():
+                st.sidebar.write(f"Model: {model}")
+                st.sidebar.write(f"Type: {type(config)}")
+                if isinstance(config, dict):
+                    st.sidebar.write(f"Keys: {list(config.keys())}")
+        
         config_json = json.dumps(st.session_state.configurations, indent=2)
         st.sidebar.download_button(
             "📤 Export Configs",
@@ -975,13 +1440,28 @@ def main():
             try:
                 json_data = json.load(uploaded_json)
                 st.write("**Found models:**")
-                for model_name in json_data.keys():
-                    st.write(f"• {model_name}")
+                
+                # Check if json_data is properly structured
+                models_found = []
+                for key, value in json_data.items():
+                    if isinstance(value, dict) and "row_mappings" in value:
+                        # This is a valid model configuration
+                        models_found.append(key)
+                        st.write(f"• {key}")
+                    else:
+                        st.warning(f"⚠️ Invalid configuration for key: {key}")
                 
                 if st.button("📥 Load Configuration"):
-                    st.session_state.configurations.update(json_data)
-                    st.success(f"✅ Loaded {len(json_data)} configuration(s)!")
-                    st.rerun()
+                    # Only load valid configurations
+                    valid_configs = {k: v for k, v in json_data.items() 
+                                   if isinstance(v, dict) and "row_mappings" in v}
+                    
+                    if valid_configs:
+                        st.session_state.configurations = valid_configs
+                        st.success(f"✅ Loaded {len(valid_configs)} configuration(s)!")
+                        st.rerun()
+                    else:
+                        st.error("❌ No valid configurations found in the JSON file")
             except Exception as e:
                 st.error(f"Error reading JSON: {e}")
         
